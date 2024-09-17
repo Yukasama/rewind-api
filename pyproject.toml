@@ -1,0 +1,17 @@
+[tool.poetry]
+name = "rewind-api"
+version = "0.1.0"
+description = "Stock trading API"
+authors = ["Your Name <your.email@example.com>"]
+readme = "README.md"
+license = "MIT"
+
+[tool.poetry.dependencies]
+python = ">=3.12"
+fmpsdk = "*"
+fastapi = "*"
+TA-Lib = "*"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
