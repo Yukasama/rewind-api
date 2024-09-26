@@ -10,7 +10,6 @@ pip install pyprojects.toml
 ```bash
 ./Scripts/activate
 fastapi dev src/rewind-api/main.py
-uvicorn main:app --reload
 ```
 
 ```bash
