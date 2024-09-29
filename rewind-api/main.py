@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 import logging
-import talib as ta
+import pandas_ta as ta
 import numpy as np
 from typing import Optional, List, Dict
 from datetime import datetime
@@ -11,21 +11,21 @@ import os
 from pydantic import BaseModel, Field
 
 load_dotenv()
-apikey = os.environ.get("API_KEY")
+apikey = os.environ.get("FMP_API_KEY")
 
 app = FastAPI()
 logger = logging.getLogger(__name__)
 logging.basicConfig(filename="./example.log", encoding="utf-8", level=logging.DEBUG)
 
-# Mapping of indicators to their required inputs and default parameters
+# Mapping of indicators to their required inputs and default parameters (Adjusted for pandas-ta)
 INDICATOR_INFO = {
-    'SMA': {'inputs': ['adjClose'], 'defaults': {'timeperiod': 14}},
-    'EMA': {'inputs': ['adjClose'], 'defaults': {'timeperiod': 14}},
-    'RSI': {'inputs': ['adjClose'], 'defaults': {'timeperiod': 14}},
-    'MACD': {'inputs': ['adjClose'], 'defaults': {'fastperiod': 12, 'slowperiod': 26, 'signalperiod': 9}},
-    'CCI': {'inputs': ['high', 'low', 'adjClose'], 'defaults': {'timeperiod': 14}},
-    'STOCH': {'inputs': ['high', 'low', 'adjClose'], 'defaults': {'fastk_period': 5, 'slowk_period': 3, 'slowd_period': 3}},
-    'ATR': {'inputs': ['high', 'low', 'adjClose'], 'defaults': {'timeperiod': 14}},
+    'SMA': {'inputs': ['adjClose'], 'defaults': {'length': 14}},
+    'EMA': {'inputs': ['adjClose'], 'defaults': {'length': 14}},
+    'RSI': {'inputs': ['adjClose'], 'defaults': {'length': 14}},
+    'MACD': {'inputs': ['adjClose'], 'defaults': {'fast': 12, 'slow': 26, 'signal': 9}},
+    'CCI': {'inputs': ['high', 'low', 'adjClose'], 'defaults': {'length': 14, 'c': 0.015}},
+    'STOCH': {'inputs': ['high', 'low', 'adjClose'], 'defaults': {'k': 5, 'd': 3, 'smooth_k': 3}},
+    'ATR': {'inputs': ['high', 'low', 'adjClose'], 'defaults': {'length': 14}},
     # Add more indicators as needed
 }
 
@@ -75,10 +75,13 @@ async def run_strategy(config: StrategyConfig):
 
         # Compute ATR
         atr_info = INDICATOR_INFO['ATR']
-        atr_function = getattr(ta, 'ATR')
-        atr_inputs = [df[col] for col in atr_info['inputs']]
-        atr_params = atr_info['defaults']
-        df['ATR'] = atr_function(*atr_inputs, **atr_params)
+        atr_params = atr_info['defaults'].copy()
+        atr_params.update({
+            'high': df['high'],
+            'low': df['low'],
+            'close': df['adjClose'],
+        })
+        df['ATR'] = ta.atr(**atr_params)
 
         # Compute Baseline Indicator
         baseline_name = config.baseline_indicator.name.upper()
@@ -86,13 +89,39 @@ async def run_strategy(config: StrategyConfig):
         if not baseline_info:
             raise HTTPException(status_code=400, detail=f"Unsupported baseline indicator: {baseline_name}")
 
-        baseline_function = getattr(ta, baseline_name)
-        baseline_inputs = [df[col] for col in baseline_info['inputs']]
-        baseline_params = baseline_info['defaults']
-        # Override defaults if params provided
+        # Function names in pandas-ta are lowercase
+        function_name = baseline_name.lower()
+        baseline_function = getattr(ta, function_name, None)
+        if not baseline_function:
+            raise HTTPException(status_code=400, detail=f"Indicator function not found in pandas-ta: {function_name}")
+
+        baseline_params = baseline_info['defaults'].copy()
         if config.baseline_indicator.params:
             baseline_params.update(config.baseline_indicator.params)
-        df['Baseline'] = baseline_function(*baseline_inputs, **baseline_params)
+
+        # Map inputs
+        for col in baseline_info['inputs']:
+            param_name = 'close' if col == 'adjClose' else col.lower()
+            baseline_params[param_name] = df[col]
+
+        # Compute indicator
+        baseline_result = baseline_function(**baseline_params)
+
+        # Handle indicators that return multiple outputs
+        if isinstance(baseline_result, pd.DataFrame):
+            # For MACD or other indicators with multiple columns, pick the main one
+            if function_name == 'macd':
+                df['Baseline'] = baseline_result['MACD_{}_{}_{}'.format(
+                    baseline_params.get('fast', 12),
+                    baseline_params.get('slow', 26),
+                    baseline_params.get('signal', 9)
+                )]
+            else:
+                df['Baseline'] = baseline_result.iloc[:, 0]
+        elif isinstance(baseline_result, pd.Series):
+            df['Baseline'] = baseline_result
+        else:
+            raise HTTPException(status_code=400, detail=f"Unexpected result type from indicator {baseline_name}")
 
         # Compute Buy Indicators
         for idx, indicator in enumerate(config.buy_indicators):
@@ -101,22 +130,39 @@ async def run_strategy(config: StrategyConfig):
             if not indicator_info:
                 raise HTTPException(status_code=400, detail=f"Unsupported buy indicator: {name}")
 
-            function = getattr(ta, name)
-            inputs = [df[col] for col in indicator_info['inputs']]
+            function_name = name.lower()
+            function = getattr(ta, function_name, None)
+            if not function:
+                raise HTTPException(status_code=400, detail=f"Indicator function not found in pandas-ta: {function_name}")
+
             params = indicator_info['defaults'].copy()
             if indicator.params:
                 params.update(indicator.params)
             threshold = indicator.threshold
             indicator_column = f"Buy_Indicator_{idx+1}"
 
+            # Map inputs
+            for col in indicator_info['inputs']:
+                param_name = 'close' if col == 'adjClose' else col.lower()
+                params[param_name] = df[col]
+
             # Compute indicator
-            result = function(*inputs, **params)
+            result = function(**params)
 
             # Handle indicators that return multiple outputs
-            if isinstance(result, tuple):
-                df[indicator_column] = result[0]
-            else:
+            if isinstance(result, pd.DataFrame):
+                if function_name == 'macd':
+                    df[indicator_column] = result['MACD_{}_{}_{}'.format(
+                        params.get('fast', 12),
+                        params.get('slow', 26),
+                        params.get('signal', 9)
+                    )]
+                else:
+                    df[indicator_column] = result.iloc[:, 0]
+            elif isinstance(result, pd.Series):
                 df[indicator_column] = result
+            else:
+                raise HTTPException(status_code=400, detail=f"Unexpected result type from indicator {name}")
 
             df[f"Buy_Threshold_{idx+1}"] = threshold
 
@@ -126,19 +172,36 @@ async def run_strategy(config: StrategyConfig):
         if not sell_indicator_info:
             raise HTTPException(status_code=400, detail=f"Unsupported sell indicator: {sell_name}")
 
-        sell_function = getattr(ta, sell_name)
-        sell_inputs = [df[col] for col in sell_indicator_info['inputs']]
+        sell_function_name = sell_name.lower()
+        sell_function = getattr(ta, sell_function_name, None)
+        if not sell_function:
+            raise HTTPException(status_code=400, detail=f"Indicator function not found in pandas-ta: {sell_function_name}")
+
         sell_params = sell_indicator_info['defaults'].copy()
         if config.sell_indicator.params:
             sell_params.update(config.sell_indicator.params)
         sell_threshold = config.sell_indicator.threshold
         sell_indicator_column = "Sell_Indicator"
 
-        sell_result = sell_function(*sell_inputs, **sell_params)
-        if isinstance(sell_result, tuple):
-            df[sell_indicator_column] = sell_result[0]
-        else:
+        # Map inputs
+        for col in sell_indicator_info['inputs']:
+            param_name = 'close' if col == 'adjClose' else col.lower()
+            sell_params[param_name] = df[col]
+
+        sell_result = sell_function(**sell_params)
+        if isinstance(sell_result, pd.DataFrame):
+            if sell_function_name == 'macd':
+                df[sell_indicator_column] = sell_result['MACD_{}_{}_{}'.format(
+                    sell_params.get('fast', 12),
+                    sell_params.get('slow', 26),
+                    sell_params.get('signal', 9)
+                )]
+            else:
+                df[sell_indicator_column] = sell_result.iloc[:, 0]
+        elif isinstance(sell_result, pd.Series):
             df[sell_indicator_column] = sell_result
+        else:
+            raise HTTPException(status_code=400, detail=f"Unexpected result type from indicator {sell_name}")
         df["Sell_Threshold"] = sell_threshold
 
         # Initialize variables
@@ -176,7 +239,7 @@ async def run_strategy(config: StrategyConfig):
                 else:
                     # For moving averages or other indicators without thresholds
                     # Example: Simple moving average crossover (price crossing above the SMA)
-                    buy_signal = close > indicator_value and close <= indicator_prev
+                    buy_signal = (close > indicator_value) and (close <= indicator_prev)
                 buy_signals.append(buy_signal)
 
             price_above_baseline = close > baseline_value
@@ -191,7 +254,7 @@ async def run_strategy(config: StrategyConfig):
                     sell_signal = (sell_indicator_prev > sell_threshold) and (sell_indicator_value < sell_threshold)
                 else:
                     # Example: Simple moving average crossover (price crossing below the EMA)
-                    sell_signal = close < sell_indicator_value and close >= sell_indicator_prev
+                    sell_signal = (close < sell_indicator_value) and (close >= sell_indicator_prev)
             price_below_baseline = close < baseline_value
 
             if position is None:

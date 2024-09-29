@@ -5,13 +5,22 @@ description = "Stock trading API"
 authors = ["Your Name <your.email@example.com>"]
 readme = "README.md"
 license = "MIT"
+package-mode = false
 
 [tool.poetry.dependencies]
-python = ">=3.11"
-fmpsdk = "*"
-fastapi = "*"
-TA-Lib = "*"
+python = "^3.11"
+fmpsdk = "^20240330.0"
+pandas-ta = "^0.3.14b0"
+fastapi = {version = "^0.115.0", extras = ["standard"]}
+setuptools = "^75.1.0"
+
+[tool.poetry.group.dev.dependencies]
+ruff = "^0.6.8"
 
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+line-length = 88
+select = ["E", "F", "W", "C90"]  
